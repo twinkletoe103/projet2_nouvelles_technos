@@ -45,7 +45,12 @@ class HlProjet2Spider(scrapy.Spider):
             yield response.follow(next_page, self.parse)
         else:
             # une fois tous les liens collectés, commence le scraping en boucle
-            yield from self.scrape_loop()
+            # yield from self.scrape_loop()
+            if self.all_links:
+                yield scrapy.Request(
+                    self.all_links[self.index_loop],
+                    callback=self.parse_book
+                )
 
     def scrape_loop(self):
         # boucle sur les liens jusqu'à atteindre max_items
@@ -56,7 +61,8 @@ class HlProjet2Spider(scrapy.Spider):
 
     def parse_book(self, response):
         if self.compteur >= self.max_items:
-            return
+            self.logger.info(f"Récolte de données complétée ({self.max_items} items collectés).")
+            raise scrapy.exceptions.CloseSpider(reason="max_items_reached")
 
         self.compteur += 1
 
@@ -74,7 +80,6 @@ class HlProjet2Spider(scrapy.Spider):
         titre = response.css("div.product_main h1::text").get()
         disponibilite = response.css("p.availability::text").getall()[-1].strip()
         categorie = categories[1] if len(categories) >= 2 else ""
-        sous_categorie = categories[-1] if len(categories) >= 2 else ""
 
         # traduction des données texte
         titre = self.translate_text(titre)
@@ -94,3 +99,8 @@ class HlProjet2Spider(scrapy.Spider):
             "image_url": response.urljoin(response.css("div.item img::attr(src)").get()),
             "url": response.url
         }
+
+        if self.compteur < self.max_items:
+            self.index_loop = (self.index_loop + 1) % len(self.all_links)
+            next_link = self.all_links[self.index_loop]
+            yield scrapy.Request(next_link, callback=self.parse_book)
