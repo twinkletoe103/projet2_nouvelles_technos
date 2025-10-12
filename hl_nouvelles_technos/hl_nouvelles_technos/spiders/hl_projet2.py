@@ -7,15 +7,15 @@ class HlProjet2Spider(scrapy.Spider):
     start_urls = ["https://books.toscrape.com/"]
 
     compteur = 0
-    max_items = 10
+    max_items = 2500
     all_links = []  # pour stocker tous les liens scrappés
     index_loop = 0  # pour boucler sur les liens
 
     translator = GoogleTranslator(source="en", target="fr")
     cache_traductions = {}  # cache local pour accélérer
 
+    # tarduction avec cache et gestion d'erreur
     def translate_text(self, texte):
-        # tarduction avec cache et gestion d'erreur.
         if not texte:
             return ""
         texte = texte.strip()
