@@ -10,48 +10,23 @@ class HlProjet2Spider(scrapy.Spider):
         "art", "children", "mystery", "drama", "education",
         "travel", "music", "technology", "poetry", "health"
     ] # tableau de catégorie pour ne pas avoir 2500 science-fiction
-    start_urls = [f"https://openlibrary.org/subjects/{s}.json?limit=100&offset=0" for s in subjects]
 
     compteur = 0
-    max_items = 20
+    max_items = 2500
     current_subject_index = 0  # index pour tourner entre les catégories
-    livres_par_page = 100 # propre au site, changer si un nouveau site
+    livres_par_page = 170 # atteindre 2500 items en prenant 170 de chaque categorie (15)
 
     translator = GoogleTranslator(source="en", target="fr")
     cache_traductions = {}  # cache local pour accélérer
 
     # pour suivre la position (offset et index) par catégorie
-    progression = {s: {"offset": 0, "index": 0, "works": []} for s in subjects}
+    progression = {s: {"offset": 0} for s in subjects}
 
     def start_requests(self):
         # commence avec la première catégorie
-        yield from self.request_next_category()
-
-    def request_next_category(self):
-        # demande la page actuelle de la catégorie
         sujet = self.subjects[self.current_subject_index]
-        info = self.progression[sujet]
-
-        # si la liste actuelle est vide, on va chercher une nouvelle page
-        if not info["works"]:
-            url = f"https://openlibrary.org/subjects/{sujet}.json?limit={self.livres_par_page}&offset={info['offset']}"
-            yield scrapy.Request(url, callback=self.parse, meta={"categorie": sujet})
-        else:
-            # sinon, on prend le prochain livre
-            work = info["works"].pop(0)
-            yield from self.parse_book(work, sujet)
-            yield from self.next_cycle()
-
-    def next_cycle(self):
-        # boucle sur les catégories
-        self.current_subject_index = (self.current_subject_index + 1) % len(self.subjects)
-
-        if self.compteur < self.max_items:
-            yield from self.request_next_category()
-        else:
-            # quand on a atteint le nombre d'items souhaités, on sort du spider
-            self.logger.info(f"Récolte de données complétée ({self.max_items} livres).")
-            raise scrapy.exceptions.CloseSpider(reason="max_items_reached")
+        url = f"https://openlibrary.org/subjects/{sujet}.json?limit={self.livres_par_page}&offset=0"
+        yield scrapy.Request(url, callback=self.parse, meta={"categorie": sujet})
 
     # tarduction avec cache et gestion d'erreur
     def translate_text(self, texte):
@@ -74,31 +49,24 @@ class HlProjet2Spider(scrapy.Spider):
         categorie = response.meta["categorie"]
         data = response.json()
         works = data.get("works", [])
-
-        if not works:
-            self.logger.warning(f"Aucun livre trouvé pour {categorie}")
-            yield from self.next_cycle()
-            return
         
-        # stock les livres dans la progression
-        info = self.progression[categorie]
-        info["works"] = works
-        info["offset"] += self.livres_par_page
+        for work in works:
+            if self.compteur < self.max_items:
+                self.compteur += 1
+                yield self.parse_book_item(work, categorie)
+            else:
+                raise scrapy.exceptions.CloseSpider(reason="max_items_reached")
 
-        # prend le premier livre et continue
-        work = info["works"].pop(0)
-        yield from self.parse_book(work, categorie)
-        yield from self.next_cycle()
+        # passe à la prochaine catégorie
+        self.current_subject_index = (self.current_subject_index + 1) % len(self.subjects)
+        next_sujet = self.subjects[self.current_subject_index]
+        next_offset = self.progression[next_sujet]["offset"]
+        self.progression[next_sujet]["offset"] += self.livres_par_page
 
+        url = f"https://openlibrary.org/subjects/{next_sujet}.json?limit={self.livres_par_page}&offset={next_offset}"
+        yield scrapy.Request(url, callback=self.parse, meta={"categorie": next_sujet})
 
-    def parse_book(self, work, categorie):
-        # quand on a atteint le nombre d'items souhaités, on sort du spider
-        if self.compteur >= self.max_items:
-            self.logger.info(f"Récolte de données complétée ({self.max_items} items).")
-            raise scrapy.exceptions.CloseSpider(reason="max_items_reached")
-
-        self.compteur += 1
-
+    def parse_book_item(self, work, categorie):
         # données texte
         titre = work.get("title", "")
         auteur = work["authors"][0]["name"] if work.get("authors") else ""
@@ -121,7 +89,7 @@ class HlProjet2Spider(scrapy.Spider):
         categorie = self.translate_text(categorie.replace("_", " ").title())
         sous_categorie = [self.translate_text(s) for s in sous_categorie] # traduction de tout le tableau
 
-        yield {
+        return {
             "id_livre": self.compteur-1,
             "titre": titre, # français avec des accents
             "auteur": auteur,
@@ -131,3 +99,4 @@ class HlProjet2Spider(scrapy.Spider):
             "note_popularite": note_popularite,  # décimal
             "image_url": couverture, # url pointant vers l'image
         }
+
