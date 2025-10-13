@@ -3,16 +3,55 @@ import scrapy
 
 class HlProjet2Spider(scrapy.Spider):
     name = "hl_projet2"
-    allowed_domains = ["books.toscrape.com"]
-    start_urls = ["https://books.toscrape.com/"]
+    allowed_domains = ["openlibrary.org"]
+
+    subjects = [
+        "science_fiction", "romance", "history", "fantasy", "biography",
+        "art", "children", "mystery", "drama", "education",
+        "travel", "music", "technology", "poetry", "health"
+    ] # tableau de catégorie pour ne pas avoir 2500 science-fiction
+    start_urls = [f"https://openlibrary.org/subjects/{s}.json?limit=100&offset=0" for s in subjects]
 
     compteur = 0
-    max_items = 2500
-    all_links = []  # pour stocker tous les liens scrappés
-    index_loop = 0  # pour boucler sur les liens
+    max_items = 20
+    current_subject_index = 0  # index pour tourner entre les catégories
+    livres_par_page = 100 # propre au site, changer si un nouveau site
 
     translator = GoogleTranslator(source="en", target="fr")
     cache_traductions = {}  # cache local pour accélérer
+
+    # pour suivre la position (offset et index) par catégorie
+    progression = {s: {"offset": 0, "index": 0, "works": []} for s in subjects}
+
+    def start_requests(self):
+        # commence avec la première catégorie
+        yield from self.request_next_category()
+
+    def request_next_category(self):
+        # demande la page actuelle de la catégorie
+        sujet = self.subjects[self.current_subject_index]
+        info = self.progression[sujet]
+
+        # si la liste actuelle est vide, on va chercher une nouvelle page
+        if not info["works"]:
+            url = f"https://openlibrary.org/subjects/{sujet}.json?limit={self.livres_par_page}&offset={info['offset']}"
+            yield scrapy.Request(url, callback=self.parse, meta={"categorie": sujet})
+        else:
+            # sinon, on prend le prochain livre
+            work = info["works"].pop(0)
+            yield from self.parse_book(work, sujet)
+            yield from self.next_cycle()
+
+    def next_cycle(self):
+        # boucle sur les catégories
+        self.current_subject_index = (self.current_subject_index + 1) % len(self.subjects)
+
+        if self.compteur < self.max_items:
+            yield from self.request_next_category()
+        else:
+            # quand on a atteint le nombre d'items souhaités, on sort du spider
+            self.logger.info(f"Récolte de données complétée ({self.max_items} livres).")
+            raise scrapy.exceptions.CloseSpider(reason="max_items_reached")
 
     # tarduction avec cache et gestion d'erreur
     def translate_text(self, texte):
@@ -30,77 +69,65 @@ class HlProjet2Spider(scrapy.Spider):
             self.logger.warning(f"Erreur de traduction pour '{texte}': {e}")
             return texte
 
-    # va récupérer toutes les pages avant d'appeler scrape_loop, qui lui appelle parse_book pour ramasser les infos souhaitées
+    # récupère un seul livre par catégorie et passe à la suivante
     def parse(self, response):
-        links = response.css("h3 a::attr(href)").getall()
-        links = [response.urljoin(l) for l in links]
+        categorie = response.meta["categorie"]
+        data = response.json()
+        works = data.get("works", [])
 
-        for link in links:
-            if link not in self.all_links:
-                self.all_links.append(link)
+        if not works:
+            self.logger.warning(f"Aucun livre trouvé pour {categorie}")
+            yield from self.next_cycle()
+            return
+        
+        # stock les livres dans la progression
+        info = self.progression[categorie]
+        info["works"] = works
+        info["offset"] += self.livres_par_page
 
-        # pagination, parce que tous les produits ne sont pas sur une seule page
-        next_page = response.css("li.next a::attr(href)").get()
-        if next_page:
-            yield response.follow(next_page, self.parse)
-        else:
-            # une fois tous les liens collectés, commence le scraping en boucle
-            # yield from self.scrape_loop()
-            if self.all_links:
-                yield scrapy.Request(
-                    self.all_links[self.index_loop],
-                    callback=self.parse_book
-                )
+        # prend le premier livre et continue
+        work = info["works"].pop(0)
+        yield from self.parse_book(work, categorie)
+        yield from self.next_cycle()
 
-    def scrape_loop(self):
-        # boucle sur les liens jusqu'à atteindre max_items
-        while self.compteur < self.max_items:
-            link = self.all_links[self.index_loop]
-            self.index_loop = (self.index_loop + 1) % len(self.all_links)
-            yield scrapy.Request(link, callback=self.parse_book)
 
-    def parse_book(self, response):
+    def parse_book(self, work, categorie):
+        # quand on a atteint le nombre d'items souhaités, on sort du spider
         if self.compteur >= self.max_items:
-            self.logger.info(f"Récolte de données complétée ({self.max_items} items collectés).")
+            self.logger.info(f"Récolte de données complétée ({self.max_items} items).")
             raise scrapy.exceptions.CloseSpider(reason="max_items_reached")
 
         self.compteur += 1
 
-        reviews_text = response.css("table.table.table-striped tr:nth-child(7) td::text").get()
-        try:
-            nombre_revs = int(reviews_text.strip())
-        except:
-            nombre_revs = 0
+        # données texte
+        titre = work.get("title", "")
+        auteur = work["authors"][0]["name"] if work.get("authors") else ""
+        couverture = f"https://covers.openlibrary.org/b/id/{work['cover_id']}-L.jpg" if work.get("cover_id") else ""
+        sujets = work.get("subject", [])
 
-        # catégorie et sous-catégorie pour permettre de filtre
-        categories = response.css("ul.breadcrumb li a::text").getall()
-        sous_categorie = categories[-1] if len(categories) >= 2 else ""
+        if sujets:
+            # prends le premier élément et le découpe sur les virgules pour faire un tableau
+            sous_categorie = [s.strip() for s in sujets[0].split(",")]
+        else:
+            sous_categorie = ["Général"]
 
-        # récupérer les données texte d'abord pour les traduire avant de les mettres dans le fichier json
-        titre = response.css("div.product_main h1::text").get()
-        disponibilite = response.css("p.availability::text").getall()[-1].strip()
-        categorie = categories[1] if len(categories) >= 2 else ""
+        # données numériques
+        nombre_editions = int(work.get("edition_count", 0))
+        note_popularite = round(nombre_editions / 10, 2)  
 
         # traduction des données texte
         titre = self.translate_text(titre)
-        disponibilite = self.translate_text(disponibilite)
-        categorie = self.translate_text(categorie)
-        sous_categorie = self.translate_text(sous_categorie)
+        auteur = self.translate_text(auteur)
+        categorie = self.translate_text(categorie.replace("_", " ").title())
+        sous_categorie = [self.translate_text(s) for s in sous_categorie] # traduction de tout le tableau
 
-        # ajout des données dans le fichier json
         yield {
             "id_livre": self.compteur-1,
-            "titre": titre,
-            "prix": float(response.css("p.price_color::text").re_first(r"[\d\.]+")),
-            "disponibilite": disponibilite,
-            "categorie": categorie,
-            "sous_categorie": sous_categorie,
-            "nombre_revs": nombre_revs,
-            "image_url": response.urljoin(response.css("div.item img::attr(src)").get()),
-            "url": response.url
+            "titre": titre, # français avec des accents
+            "auteur": auteur,
+            "categorie": categorie, # trier ou regrouper
+            "sous_categorie": sous_categorie, # trier ou regrouper
+            "nombre_editions": nombre_editions,  # entier
+            "note_popularite": note_popularite,  # décimal
+            "image_url": couverture, # url pointant vers l'image
         }
-
-        if self.compteur < self.max_items:
-            self.index_loop = (self.index_loop + 1) % len(self.all_links)
-            next_link = self.all_links[self.index_loop]
-            yield scrapy.Request(next_link, callback=self.parse_book)
